@@ -1,5 +1,5 @@
 model:
-  base_learning_rate: 1.0e-04
+  base_learning_rate: 5.0e-05
   target: ldm.models.diffusion.ddpm.LatentDiffusion
   params:
     linear_start: 0.00085
@@ -7,15 +7,18 @@ model:
     num_timesteps_cond: 1
     log_every_t: 200
     timesteps: 1000
-    first_stage_key: "jpg"
-    cond_stage_key: "txt"
+    first_stage_key: image
+    cond_stage_key: caption
     image_size: 64
     channels: 4
-    cond_stage_trainable: false   # Note: different from the one we trained before
+    cond_stage_trainable: true   # Note: different from the one we trained before
     conditioning_key: crossattn
     monitor: val/loss_simple_ema
     scale_factor: 0.18215
     use_ema: False
+    embedding_reg_weight: 0.0
+    unfreeze_model: True
+    model_lr: 1.0e-7
 
     personalization_config:
       target: ldm.modules.embedding_manager.EmbeddingManager
@@ -25,7 +28,7 @@ model:
         per_image_tokens: false
         num_vectors_per_token: 1
         progressive_words: False
-        
+
     unet_config:
       target: ldm.modules.diffusionmodules.openaimodel.UNetModel
       params:
@@ -51,7 +54,7 @@ model:
         ddconfig:
           double_z: true
           z_channels: 4
-          resolution: 256
+          resolution: 512
           in_channels: 3
           out_ch: 3
           ch: 128
@@ -68,3 +71,40 @@ model:
 
     cond_stage_config:
       target: ldm.modules.encoders.modules.FrozenCLIPEmbedder
+
+data:
+  target: main.DataModuleFromConfig
+  params:
+    batch_size: 1
+    num_workers: 2
+    wrap: false
+    train:
+      target: ldm.data.personalized.PersonalizedBase
+      params:
+        size: 512
+        set: train
+        per_image_tokens: false
+        repeats: 100
+    validation:
+      target: ldm.data.personalized.PersonalizedBase
+      params:
+        size: 512
+        set: val
+        per_image_tokens: false
+        repeats: 10
+
+lightning:
+  modelcheckpoint:
+    params:
+      every_n_train_steps: 500
+  callbacks:
+    image_logger:
+      target: main.ImageLogger
+      params:
+        batch_frequency: 500
+        max_images: 8
+        increase_log_steps: False
+
+  trainer:
+    benchmark: True
+    max_steps: 4200
