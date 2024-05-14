@@ -5,7 +5,7 @@ from omegaconf import OmegaConf
 from PIL import Image
 from tqdm import tqdm, trange
 from einops import rearrange
-from torchvision.utils import make_grid
+from torchvision.utils import make_grid, save_image
 
 from ldm.util import instantiate_from_config
 from ldm.models.diffusion.ddim import DDIMSampler
@@ -117,7 +117,7 @@ if __name__ == "__main__":
 
     config = OmegaConf.load("configs/latent-diffusion/txt2img-1p4B-eval_with_tokens.yaml")  # TODO: Optionally download from same location as ckpt and chnage this logic
     model = load_model_from_config(config, opt.ckpt_path)  # TODO: check path
-    model.embedding_manager.load(opt.embedding_path)
+    #model.embedding_manager.load(opt.embedding_path)
 
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     model = model.to(device)
@@ -168,6 +168,10 @@ if __name__ == "__main__":
     # additionally, save as grid
     grid = torch.stack(all_samples, 0)
     grid = rearrange(grid, 'n b c h w -> (n b) c h w')
+    
+    for i in range(grid.size(0)):
+           save_image(grid[i, :, :, :], os.path.join(outpath,opt.prompt+'_{}.png'.format(i)))
+           
     grid = make_grid(grid, nrow=opt.n_samples)
 
     # to image

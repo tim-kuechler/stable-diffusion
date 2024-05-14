@@ -35,6 +35,7 @@ def load_model_from_config(config, ckpt, verbose=False):
         print("unexpected keys:")
         print(u)
 
+    model.cuda()
     return model
 
 def get_parser(**parser_kwargs):
@@ -132,8 +133,8 @@ def get_parser(**parser_kwargs):
         "--scale_lr",
         type=str2bool,
         nargs="?",
-        const=True,
-        default=True,
+        const=False,
+        default=False,
         help="scale base-lr by ngpu * batch_size * n_accumulate",
     )
 
@@ -154,15 +155,21 @@ def get_parser(**parser_kwargs):
         type=str, 
         required=True, 
         help="Path to directory with training images")
+    
+    parser.add_argument("--reg_data_root", 
+        type=str, 
+        required=True, 
+        help="Path to directory with regularization images")
 
     parser.add_argument("--embedding_manager_ckpt", 
         type=str, 
         default="", 
         help="Initialize embedding manager from a checkpoint")
 
-    parser.add_argument("--placeholder_string", 
+    parser.add_argument("--class_word", 
         type=str, 
-        help="Placeholder string which will be used to denote the concept in future prompts. Overwrites the config options.")
+        default="dog",
+        help="Placeholder token which will be used to denote the concept in future prompts")
 
     parser.add_argument("--init_word", 
         type=str, 
@@ -206,9 +213,18 @@ def worker_init_fn(_):
     else:
         return np.random.seed(np.random.get_state()[1][0] + worker_id)
 
+class ConcatDataset(Dataset):
+    def __init__(self, *datasets):
+        self.datasets = datasets
 
+    def __getitem__(self, idx):
+        return tuple(d[idx] for d in self.datasets)
+
+    def __len__(self):
+        return min(len(d) for d in self.datasets)
+    
 class DataModuleFromConfig(pl.LightningDataModule):
-    def __init__(self, batch_size, train=None, validation=None, test=None, predict=None,
+    def __init__(self, batch_size, train=None, reg = None, validation=None, test=None, predict=None,
                  wrap=False, num_workers=None, shuffle_test_loader=False, use_worker_init_fn=False,
                  shuffle_val_dataloader=False):
         super().__init__()
@@ -218,7 +234,11 @@ class DataModuleFromConfig(pl.LightningDataModule):
         self.use_worker_init_fn = use_worker_init_fn
         if train is not None:
             self.dataset_configs["train"] = train
-            self.train_dataloader = self._train_dataloader
+        if reg is not None:
+            self.dataset_configs["reg"] = reg
+        
+        self.train_dataloader = self._train_dataloader
+        
         if validation is not None:
             self.dataset_configs["validation"] = validation
             self.val_dataloader = partial(self._val_dataloader, shuffle=shuffle_val_dataloader)
@@ -248,7 +268,10 @@ class DataModuleFromConfig(pl.LightningDataModule):
             init_fn = worker_init_fn
         else:
             init_fn = None
-        return DataLoader(self.datasets["train"], batch_size=self.batch_size,
+        train_set = self.datasets["train"]
+        reg_set = self.datasets["reg"]
+        concat_dataset = ConcatDataset(train_set, reg_set)
+        return DataLoader(concat_dataset, batch_size=self.batch_size,
                           num_workers=self.num_workers, shuffle=False if is_iterable_dataset else True,
                           worker_init_fn=init_fn)
 
@@ -601,12 +624,15 @@ if __name__ == "__main__":
         # model
 
         # config.model.params.personalization_config.params.init_word = opt.init_word
-        config.model.params.personalization_config.params.embedding_manager_ckpt = opt.embedding_manager_ckpt
-        if opt.placeholder_string:
-            config.model.params.personalization_config.params.placeholder_strings = [opt.placeholder_string]
+        # config.model.params.personalization_config.params.embedding_manager_ckpt = opt.embedding_manager_ckpt
+        # config.model.params.personalization_config.params.placeholder_tokens = opt.placeholder_tokens
 
-        if opt.init_word:
-            config.model.params.personalization_config.params.initializer_words[0] = opt.init_word
+        # if opt.init_word:
+        #     config.model.params.personalization_config.params.initializer_words[0] = opt.init_word
+            
+        config.data.params.train.params.placeholder_token = opt.class_word
+        config.data.params.reg.params.placeholder_token = opt.class_word
+        config.data.params.validation.params.placeholder_token = opt.class_word
 
         if opt.actual_resume:
             model = load_model_from_config(config, opt.actual_resume)
@@ -741,6 +767,7 @@ if __name__ == "__main__":
 
         # data
         config.data.params.train.params.data_root = opt.data_root
+        config.data.params.reg.params.data_root = opt.reg_data_root
         config.data.params.validation.params.data_root = opt.data_root
         data = instantiate_from_config(config.data)
 

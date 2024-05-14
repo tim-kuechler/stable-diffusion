@@ -1,151 +1,91 @@
-# An Image is Worth One Word: Personalizing Text-to-Image Generation using Textual Inversion
+# Dreambooth on Stable Diffusion
 
-[![arXiv](https://img.shields.io/badge/arXiv-2208.01618-b31b1b.svg)](https://arxiv.org/abs/2208.01618)
+This is an implementtaion of Google's [Dreambooth](https://arxiv.org/abs/2208.12242) with [Stable Diffusion](https://github.com/CompVis/stable-diffusion). The original Dreambooth is based on [Imagen](https://imagen.research.google/) text-to-image model. However, neither the model nor the pre-trained weights of Imagen is available. To enable people to fine-tune a text-to-image model with a few examples, I implemented the idea of Dreambooth on Stable diffusion.
 
-[[Project Website](https://textual-inversion.github.io/)]
+This code repository is based on that of [Textual Inversion](https://github.com/rinongal/textual_inversion). Note that Textual Inversion only optimizes word ebedding, while dreambooth fine-tunes the whole diffusion model.
 
-> **An Image is Worth One Word: Personalizing Text-to-Image Generation using Textual Inversion**<br>
-> Rinon Gal<sup>1,2</sup>, Yuval Alaluf<sup>1</sup>, Yuval Atzmon<sup>2</sup>, Or Patashnik<sup>1</sup>, Amit H. Bermano<sup>1</sup>, Gal Chechik<sup>2</sup>, Daniel Cohen-Or<sup>1</sup> <br>
-> <sup>1</sup>Tel Aviv University, <sup>2</sup>NVIDIA
-
->**Abstract**: <br>
-> Text-to-image models offer unprecedented freedom to guide creation through natural language.
-  Yet, it is unclear how such freedom can be exercised to generate images of specific unique concepts, modify their appearance, or compose them in new roles and novel scenes.
-  In other words, we ask: how can we use language-guided models to turn <i>our</i> cat into a painting, or imagine a new product based on <i>our</i> favorite toy?
-  Here we present a simple approach that allows such creative freedom.
-  Using only 3-5 images of a user-provided concept, like an object or a style, we learn to represent it through new "words" in the embedding space of a frozen text-to-image model.
-  These "words" can be composed into natural language sentences, guiding <i>personalized</i> creation in an intuitive way.
-  Notably, we find evidence that a <i>single</i> word embedding is sufficient for capturing unique and varied concepts.
-  We compare our approach to a wide range of baselines, and demonstrate that it can more faithfully portray the concepts across a range of applications and tasks.
-
-## Description
-This repo contains the official code, data and sample inversions for our Textual Inversion paper. 
-
-## Updates
-**29/08/2022** Merge embeddings now supports SD embeddings. Added SD pivotal tuning code (WIP), fixed training duration, checkpoint save iterations.
-**21/08/2022** Code released!
-
-## TODO:
-- [x] Release code!
-- [x] Optimize gradient storing / checkpointing. Memory requirements, training times reduced by ~55%
-- [x] Release data sets
-- [ ] Release pre-trained embeddings
-- [ ] Add Stable Diffusion support
-
-## Setup
-
-Our code builds on, and shares requirements with [Latent Diffusion Models (LDM)](https://github.com/CompVis/latent-diffusion). To set up their environment, please run:
-
-```
-conda env create -f environment.yaml
-conda activate ldm
-```
-
-You will also need the official LDM text-to-image checkpoint, available through the [LDM project page](https://github.com/CompVis/latent-diffusion). 
-
-Currently, the model can be downloaded by running:
-
-```
-mkdir -p models/ldm/text2img-large/
-wget -O models/ldm/text2img-large/model.ckpt https://ommer-lab.com/files/latent-diffusion/nitro/txt2img-f8-large/model.ckpt
-```
-
+The implementation makes minimum changes over the official codebase of Textual Inversion. In fact, due to lazyness, some components in Textual Inversion, such as the embedding manager, are not deleted, although they will never be used here.
+## Update
+**9/20/2022**: I just found a way to reduce the GPU memory a bit. Remember that this code is based on Textual Inversion, and TI's code base has [this line](https://github.com/rinongal/textual_inversion/blob/main/ldm/modules/diffusionmodules/util.py#L112), which disable gradient checkpointing in a hard-code way. This is because in TI, the Unet is not optimized. However, in Dreambooth we optimize the Unet, so we can turn on the gradient checkpoint pointing trick, as in the original SD repo [here](https://github.com/CompVis/stable-diffusion/blob/main/ldm/modules/diffusionmodules/util.py#L112). The gradient checkpoint is default to be True in [config](https://github.com/XavierXiao/Dreambooth-Stable-Diffusion/blob/main/configs/stable-diffusion/v1-finetune_unfrozen.yaml#L47). I have updated the codes.
 ## Usage
 
-### Inversion
+### Preparation
+First set-up the ```ldm``` enviroment following the instruction from textual inversion repo, or the original Stable Diffusion repo.
 
-To invert an image set, run:
+To fine-tune a stable diffusion model, you need to obtain the pre-trained stable diffusion models following their [instructions](https://github.com/CompVis/stable-diffusion#stable-diffusion-v1). Weights can be downloaded on [HuggingFace](https://huggingface.co/CompVis). You can decide which version of checkpoint to use, but I use ```sd-v1-4-full-ema.ckpt```.
+
+We also need to create a set of images for regularization, as the fine-tuning algorithm of Dreambooth requires that. Details of the algorithm can be found in the paper. Note that in the original paper, the regularization images seem to be generated on-the-fly. However, here I generated a set of regularization images before the training. The text prompt for generating regularization images can be ```photo of a <class>```, where ```<class>``` is a word that describes the class of your object, such as ```dog```. The command is
 
 ```
-python main.py --base configs/latent-diffusion/txt2img-1p4B-finetune.yaml 
-               -t 
-               --actual_resume /path/to/pretrained/model.ckpt 
-               -n <run_name> 
-               --gpus 0, 
-               --data_root /path/to/directory/with/images
-               --init_word <initialization_word>
+python scripts/stable_txt2img.py --ddim_eta 0.0 --n_samples 8 --n_iter 1 --scale 10.0 --ddim_steps 50  --ckpt /path/to/original/stable-diffusion/sd-v1-4-full-ema.ckpt --prompt "a photo of a <class>" 
 ```
 
-where the initialization word should be a single-token rough description of the object (e.g., 'toy', 'painting', 'sculpture'). If the input is comprised of more than a single token, you will be prompted to replace it.
+I generate 8 images for regularization, but more regularization images may lead to stronger regularization and better editability. After that, save the generated images (separately, one image per ```.png``` file) at ```/root/to/regularization/images```.
 
-Please note that `init_word` is *not* the placeholder string that will later represent the concept. It is only used as a beggining point for the optimization scheme.
+**Updates on 9/9**
+We should definitely use more images for regularization. Please try 100 or 200, to better align with the original paper. To acomodate this, I shorten the "repeat" of reg dataset in the [config file](https://github.com/XavierXiao/Dreambooth-Stable-Diffusion/blob/main/configs/stable-diffusion/v1-finetune_unfrozen.yaml#L96).
 
-In the paper, we use 5k training iterations. However, some concepts (particularly styles) can converge much faster.
+For some cases, if the generated regularization images are highly unrealistic (happens when you want to generate "man" or "woman"), you can find a diverse set of images (of man/woman) online, and use them as regularization images.
 
-To run on multiple GPUs, provide a comma-delimited list of GPU indices to the --gpus argument (e.g., ``--gpus 0,3,7,8``)
+### Training
+Training can be done by running the following command
 
-Embeddings and output images will be saved in the log directory.
+```
+python main.py --base configs/stable-diffusion/v1-finetune_unfrozen.yaml 
+                -t 
+                --actual_resume /path/to/original/stable-diffusion/sd-v1-4-full-ema.ckpt  
+                -n <job name> 
+                --gpus 0, 
+                --data_root /root/to/training/images 
+                --reg_data_root /root/to/regularization/images 
+                --class_word <xxx>
+```
 
-See `configs/latent-diffusion/txt2img-1p4B-finetune.yaml` for more options, such as: changing the placeholder string which denotes the concept (defaults to "*"), changing the maximal number of training iterations, changing how often checkpoints are saved and more.
+Detailed configuration can be found in ```configs/stable-diffusion/v1-finetune_unfrozen.yaml```. In particular, the default learning rate is ```1.0e-6``` as I found the ```1.0e-5``` in the Dreambooth paper leads to poor editability. The parameter ```reg_weight``` corresponds to the weight of regularization in the Dreambooth paper, and the default is set to ```1.0```.
 
-**Important** All training set images should be upright. If you are using phone captured images, check the inputs_gs*.jpg files in the output image directory and make sure they are oriented correctly. Many phones capture images with a 90 degree rotation and denote this in the image metadata. Windows parses these correctly, but PIL does not. Hence you will need to correct them manually (e.g. by pasting them into paint and re-saving) or wait until we add metadata parsing.
+Dreambooth requires a placeholder word ```[V]```, called identifier, as in the paper. This identifier needs to be a relatively rare tokens in the vocabulary. The original paper approaches this by using a rare word in T5-XXL tokenizer. For simplicity, here I just use a random word ```sks``` and hard coded it.. If you want to change that, simply make a change in [this file](https://github.com/XavierXiao/Dreambooth-Stable-Diffusion/blob/main/ldm/data/personalized.py#L10).
+
+Training will be run for 800 steps, and two checkpoints will be saved at ```./logs/<job_name>/checkpoints```, one at 500 steps and one at final step. Typically the one at 500 steps works well enough. I train the model use two A6000 GPUs and it takes ~15 mins.
 
 ### Generation
-
-To generate new images of the learned concept, run:
-```
-python scripts/txt2img.py --ddim_eta 0.0 
-                          --n_samples 8 
-                          --n_iter 2 
-                          --scale 10.0 
-                          --ddim_steps 50 
-                          --embedding_path /path/to/logs/trained_model/checkpoints/embeddings_gs-5049.pt 
-                          --ckpt_path /path/to/pretrained/model.ckpt 
-                          --prompt "a photo of *"
-```
-
-where * is the placeholder string used during inversion.
-
-### Merging Checkpoints
-
-LDM embedding checkpoints can be merged into a single file by running:
+After training, personalized samples can be obtained by running the command
 
 ```
-python merge_embeddings.py 
---manager_ckpts /path/to/first/embedding.pt /path/to/second/embedding.pt [...]
---output_path /path/to/output/embedding.pt
+python scripts/stable_txt2img.py --ddim_eta 0.0 
+                                 --n_samples 8 
+                                 --n_iter 1 
+                                 --scale 10.0 
+                                 --ddim_steps 100  
+                                 --ckpt /path/to/saved/checkpoint/from/training
+                                 --prompt "photo of a sks <class>" 
 ```
 
-For SD embeddings, simply add the flag: `-sd` or `--stable_diffusion`.
-
-If the checkpoints contain conflicting placeholder strings, you will be prompted to select new placeholders. The merged checkpoint can later be used to prompt multiple concepts at once ("A photo of * in the style of @").
-
-### Pretrained Models / Data
-
-Datasets which appear in the paper are being uploaded [here](https://drive.google.com/drive/folders/1d2UXkX0GWM-4qUwThjNhFIPP7S6WUbQJ). Some sets are unavailable due to image ownership. We will upload more as we recieve permissions to do so.
-
-Pretained models coming soon.
-
-## Stable Diffusion
-
-Stable Diffusion support is a work in progress and will be completed soon™.
-
-## Tips and Tricks
-- Adding "a photo of" to the prompt usually results in better target consistency.
-- Results can be seed sensititve. If you're unsatisfied with the model, try re-inverting with a new seed (by adding `--seed <#>` to the prompt).
-
-
-## Citation
-
-If you make use of our work, please cite our paper:
-
-```
-@misc{gal2022textual,
-      doi = {10.48550/ARXIV.2208.01618},
-      url = {https://arxiv.org/abs/2208.01618},
-      author = {Gal, Rinon and Alaluf, Yuval and Atzmon, Yuval and Patashnik, Or and Bermano, Amit H. and Chechik, Gal and Cohen-Or, Daniel},
-      title = {An Image is Worth One Word: Personalizing Text-to-Image Generation using Textual Inversion},
-      publisher = {arXiv},
-      year = {2022},
-      primaryClass={cs.CV}
-}
-```
+In particular, ```sks``` is the identifier, which should be replaced by your choice if you happen to change the identifier, and ```<class>``` is the class word ```--class_word``` for training.
 
 ## Results
-Here are some sample results. Please visit our [project page](https://textual-inversion.github.io/) or read our paper for more!
+Here I show some qualitative results. The training images are obtained from the [issue](https://github.com/rinongal/textual_inversion/issues/8) in the Textual Inversion repository, and they are 3 images of a large trash container. Regularization images are generated by prompt ```photo of a container```. Regularization images are shown here:
 
-![](img/teaser.jpg)
+![](assets/a-container-0038.jpg)
 
-![](img/samples.jpg)
+After training, generated images with prompt ```photo of a sks container```:
 
-![](img/style.jpg)
+![](assets/photo-of-a-sks-container-0018.jpg)
+
+Generated images with prompt ```photo of a sks container on the beach```:
+
+![](assets/photo-of-a-sks-container-on-the-beach-0017.jpg)
+
+Generated images with prompt ```photo of a sks container on the moon```:
+
+![](assets/photo-of-a-sks-container-on-the-moon-0016.jpg)
+
+Some not-so-perfect but still interesting results:
+
+Generated images with prompt ```photo of a red sks container```:
+
+![](assets/a-red-sks-container-0021.jpg)
+
+Generated images with prompt ```a dog on top of sks container```:
+
+![](assets/a-dog-on-top-of-sks-container-0023.jpg)
+

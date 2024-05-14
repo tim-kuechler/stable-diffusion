@@ -7,8 +7,12 @@ from torchvision import transforms
 
 import random
 
-imagenet_templates_smallest = [
-    'a photo of a {}',
+training_templates_smallest = [
+    'photo of a sks {}',
+]
+
+reg_templates_smallest = [
+    'photo of a {}',
 ]
 
 imagenet_templates_small = [
@@ -137,11 +141,12 @@ class PersonalizedBase(Dataset):
                  interpolation="bicubic",
                  flip_p=0.5,
                  set="train",
-                 placeholder_token="*",
+                 placeholder_token="dog",
                  per_image_tokens=False,
                  center_crop=False,
                  mixing_prob=0.25,
                  coarse_class_text=None,
+                 reg = False
                  ):
 
         self.data_root = data_root
@@ -173,6 +178,7 @@ class PersonalizedBase(Dataset):
                               "lanczos": PIL.Image.LANCZOS,
                               }[interpolation]
         self.flip = transforms.RandomHorizontalFlip(p=flip_p)
+        self.reg = reg
 
     def __len__(self):
         return self._length
@@ -188,10 +194,10 @@ class PersonalizedBase(Dataset):
         if self.coarse_class_text:
             placeholder_string = f"{self.coarse_class_text} {placeholder_string}"
 
-        if self.per_image_tokens and np.random.uniform() < self.mixing_prob:
-            text = random.choice(imagenet_dual_templates_small).format(placeholder_string, per_img_token_list[i % self.num_images])
+        if not self.reg:
+            text = random.choice(training_templates_smallest).format(placeholder_string)
         else:
-            text = random.choice(imagenet_templates_small).format(placeholder_string)
+            text = random.choice(reg_templates_smallest).format(placeholder_string)
             
         example["caption"] = text
 
