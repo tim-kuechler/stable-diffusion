@@ -175,12 +175,6 @@ def main():
         default="autocast"
     )
 
-
-    parser.add_argument(
-        "--embedding_path", 
-        type=str, 
-        help="Path to a pre-trained embedding manager checkpoint")
-
     opt = parser.parse_args()
 
     if opt.laion400m:
@@ -193,7 +187,6 @@ def main():
 
     config = OmegaConf.load(f"{opt.config}")
     model = load_model_from_config(config, f"{opt.ckpt}")
-    #model.embedding_manager.load(opt.embedding_path)
 
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     model = model.to(device)

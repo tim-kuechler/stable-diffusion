@@ -64,9 +64,6 @@ class DDPM(pl.LightningModule):
                  cosine_s=8e-3,
                  given_betas=None,
                  original_elbo_weight=0.,
-                 embedding_reg_weight=0.,
-                 unfreeze_model=False,
-                 model_lr=0.,
                  v_posterior=0.,  # weight for choosing posterior variance as sigma = (1-v) * beta_tilde + v * beta
                  l_simple_weight=1.,
                  conditioning_key=None,
@@ -101,10 +98,6 @@ class DDPM(pl.LightningModule):
         self.v_posterior = v_posterior
         self.original_elbo_weight = original_elbo_weight
         self.l_simple_weight = l_simple_weight
-        self.embedding_reg_weight = embedding_reg_weight
-
-        self.unfreeze_model = unfreeze_model
-        self.model_lr = model_lr
 
         if monitor is not None:
             self.monitor = monitor
@@ -434,7 +427,6 @@ class LatentDiffusion(DDPM):
     def __init__(self,
                  first_stage_config,
                  cond_stage_config,
-                 personalization_config,
                  num_timesteps_cond=None,
                  cond_stage_key="image",
                  cond_stage_trainable=False,
@@ -443,7 +435,7 @@ class LatentDiffusion(DDPM):
                  conditioning_key=None,
                  scale_factor=1.0,
                  scale_by_std=False,
-                 reg_weight = 1.0,
+                 reg_weight=1.0,
                  *args, **kwargs):
         
         self.reg_weight = reg_weight
@@ -480,21 +472,6 @@ class LatentDiffusion(DDPM):
         if ckpt_path is not None:
             self.init_from_ckpt(ckpt_path, ignore_keys)
             self.restarted_from_ckpt = True
-
-
-        if not self.unfreeze_model:
-            self.cond_stage_model.eval()
-            self.cond_stage_model.train = disabled_train
-            for param in self.cond_stage_model.parameters():
-                param.requires_grad = False
-
-            self.model.eval()
-            self.model.train = disabled_train
-            for param in self.model.parameters():
-                param.requires_grad = False
-        
-        self.embedding_manager = None
-
 
     def make_cond_schedule(self, ):
         self.cond_ids = torch.full(size=(self.num_timesteps,), fill_value=self.num_timesteps - 1, dtype=torch.long)
@@ -579,7 +556,7 @@ class LatentDiffusion(DDPM):
     def get_learned_conditioning(self, c):
         if self.cond_stage_forward is None:
             if hasattr(self.cond_stage_model, 'encode') and callable(self.cond_stage_model.encode):
-                c = self.cond_stage_model.encode(c, embedding_manager=self.embedding_manager)
+                c = self.cond_stage_model.encode(c)
                 if isinstance(c, DiagonalGaussianDistribution):
                     c = c.mode()
             else:
@@ -1421,60 +1398,17 @@ class LatentDiffusion(DDPM):
     def configure_optimizers(self):
         lr = self.learning_rate
 
-        if self.embedding_manager is not None: # If using textual inversion
-            embedding_params = list(self.embedding_manager.embedding_parameters())
+        params = list(self.model.parameters())
+        if self.cond_stage_trainable:
+            print(f"{self.__class__.__name__}: Also optimizing conditioner params!")
+            params = params + list(self.cond_stage_model.parameters())
+        if self.learn_logvar:
+            print('Diffusion model optimizing logvar')
+            params.append(self.logvar)
 
-            if self.unfreeze_model: # Are we allowing the base model to train? If so, set two different parameter groups.
-                model_params = list(self.cond_stage_model.parameters()) + list(self.model.parameters())
-                opt = torch.optim.AdamW([{"params": embedding_params, "lr": lr}, {"params": model_params}], lr=self.model_lr)
-            else: # Otherwise, train only embedding
-                opt = torch.optim.AdamW(embedding_params, lr=lr)
-        else:
-            params = list(self.model.parameters())
-            if self.cond_stage_trainable:
-                print(f"{self.__class__.__name__}: Also optimizing conditioner params!")
-                params = params + list(self.cond_stage_model.parameters())
-            if self.learn_logvar:
-                print('Diffusion model optimizing logvar')
-                params.append(self.logvar)
-
-            opt = torch.optim.AdamW(params, lr=lr)
+        opt = torch.optim.AdamW(params, lr=lr)
 
         return opt
-
-    def configure_opt_embedding(self):
-
-        self.cond_stage_model.eval()
-        self.cond_stage_model.train = disabled_train
-        for param in self.cond_stage_model.parameters():
-            param.requires_grad = False
-
-        self.model.eval()
-        self.model.train = disabled_train
-        for param in self.model.parameters():
-            param.requires_grad = False
-
-        for param in self.embedding_manager.embedding_parameters():
-            param.requires_grad = True
-
-        lr = self.learning_rate
-        params = list(self.embedding_manager.embedding_parameters())
-        return torch.optim.AdamW(params, lr=lr)
-
-    def configure_opt_model(self):
-
-        for param in self.cond_stage_model.parameters():
-            param.requires_grad = True
-
-        for param in self.model.parameters():
-            param.requires_grad = True
-
-        for param in self.embedding_manager.embedding_parameters():
-            param.requires_grad = True
-
-        model_params = list(self.cond_stage_model.parameters()) + list(self.model.parameters())
-        embedding_params = list(self.embedding_manager.embedding_parameters())
-        return torch.optim.AdamW([{"params": embedding_params, "lr": self.learning_rate}, {"params": model_params}], lr=self.model_lr)
 
     @torch.no_grad()
     def to_rgb(self, x):

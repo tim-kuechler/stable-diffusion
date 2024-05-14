@@ -136,43 +136,38 @@ def get_parser(**parser_kwargs):
         default=False,
         help="scale base-lr by ngpu * batch_size * n_accumulate",
     )
-
     parser.add_argument(
         "--datadir_in_name", 
         type=str2bool, 
         nargs="?", 
         const=True, 
         default=True, 
-        help="Prepend the final directory in the data_root to the output directory name")
-
+        help="Prepend the final directory in the data_root to the output directory name"
+    )
     parser.add_argument("--actual_resume", 
         type=str,
         required=True,
-        help="Path to model to actually resume from")
-
+        help="Path to model to actually resume from"
+    )
     parser.add_argument("--data_root", 
         type=str, 
         required=True, 
-        help="Path to directory with training images")
-    
+        help="Path to directory with training images"
+    )
     parser.add_argument("--reg_data_root", 
         type=str, 
         required=True, 
-        help="Path to directory with regularization images")
-
-    parser.add_argument("--embedding_manager_ckpt", 
-        type=str, 
-        default="", 
-        help="Initialize embedding manager from a checkpoint")
-
+        help="Path to directory with regularization images"
+    )
     parser.add_argument("--class_word", 
         type=str, 
         default="dog",
-        help="Placeholder token which will be used to denote the concept in future prompts")
-
+        help="Placeholder token which will be used to denote the concept in future prompts"
+    )
     parser.add_argument("--init_word", 
         type=str, 
-        help="Word to use as source for initial token embedding")
+        help="Word to use as source for initial token embedding"
+    )
 
     return parser
 
@@ -223,7 +218,7 @@ class ConcatDataset(Dataset):
         return min(len(d) for d in self.datasets)
     
 class DataModuleFromConfig(pl.LightningDataModule):
-    def __init__(self, batch_size, train=None, reg = None, validation=None, test=None, predict=None,
+    def __init__(self, batch_size, train=None, reg=None, validation=None, test=None, predict=None,
                  wrap=False, num_workers=None, shuffle_test_loader=False, use_worker_init_fn=False,
                  shuffle_val_dataloader=False):
         super().__init__()
@@ -398,7 +393,7 @@ class ImageLogger(Callback):
             grid = grid.transpose(0, 1).transpose(1, 2).squeeze(-1)
             grid = grid.numpy()
             grid = (grid * 255).astype(np.uint8)
-            filename = "{}_gs-{:06}_e-{:06}_b-{:06}.jpg".format(
+            filename = "{}_gs-{:06}_e-{:06}_b-{:06}.png".format(
                 k,
                 global_step,
                 current_epoch,
@@ -470,7 +465,7 @@ class CUDACallback(Callback):
         torch.cuda.synchronize(trainer.root_gpu)
         self.start_time = time.time()
 
-    def on_train_epoch_end(self, trainer, pl_module):
+    def on_train_epoch_end(self, trainer, pl_module, outputs):
         torch.cuda.synchronize(trainer.root_gpu)
         max_memory = torch.cuda.max_memory_allocated(trainer.root_gpu) / 2 ** 20
         epoch_time = time.time() - self.start_time
@@ -483,22 +478,6 @@ class CUDACallback(Callback):
             rank_zero_info(f"Average Peak memory {max_memory:.2f}MiB")
         except AttributeError:
             pass
-
-class ModeSwapCallback(Callback):
-
-    def __init__(self, swap_step=2000):
-        super().__init__()
-        self.is_frozen = False
-        self.swap_step = swap_step
-
-    def on_train_epoch_start(self, trainer, pl_module):
-        if trainer.global_step < self.swap_step and not self.is_frozen:
-            self.is_frozen = True
-            trainer.optimizers = [pl_module.configure_opt_embedding()]
-
-        if trainer.global_step > self.swap_step and self.is_frozen:
-            self.is_frozen = False
-            trainer.optimizers = [pl_module.configure_opt_model()]
 
 if __name__ == "__main__":
     # custom parser to specify config files, train, test and debug mode,

@@ -106,17 +106,12 @@ if __name__ == "__main__":
         default="/data/pretrained_models/ldm/text2img-large/model.ckpt", 
         help="Path to pretrained ldm text2img model")
 
-    parser.add_argument(
-        "--embedding_path", 
-        type=str, 
-        help="Path to a pre-trained embedding manager checkpoint")
 
     opt = parser.parse_args()
 
 
     config = OmegaConf.load("configs/latent-diffusion/txt2img-1p4B-eval_with_tokens.yaml")  # TODO: Optionally download from same location as ckpt and chnage this logic
     model = load_model_from_config(config, opt.ckpt_path)  # TODO: check path
-    #model.embedding_manager.load(opt.embedding_path)
 
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     model = model.to(device)

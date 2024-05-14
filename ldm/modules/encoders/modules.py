@@ -111,12 +111,12 @@ class BERTEmbedder(AbstractEncoder):
                                               attn_layers=Encoder(dim=n_embed, depth=n_layer),
                                               emb_dropout=embedding_dropout)
 
-    def forward(self, text, embedding_manager=None):
+    def forward(self, text):
         if self.use_tknz_fn:
             tokens = self.tknz_fn(text)#.to(self.device)
         else:
             tokens = text
-        z = self.transformer(tokens, return_embeddings=True, embedding_manager=embedding_manager)
+        z = self.transformer(tokens, return_embeddings=True)
         return z
 
     def encode(self, text, **kwargs):
@@ -168,7 +168,6 @@ class FrozenCLIPEmbedder(AbstractEncoder):
                 input_ids = None,
                 position_ids = None,
                 inputs_embeds = None,
-                embedding_manager = None,
             ) -> torch.Tensor:
 
                 seq_length = input_ids.shape[-1] if input_ids is not None else inputs_embeds.shape[-2]
@@ -178,10 +177,6 @@ class FrozenCLIPEmbedder(AbstractEncoder):
 
                 if inputs_embeds is None:
                     inputs_embeds = self.token_embedding(input_ids)
-
-                if embedding_manager is not None:
-                    inputs_embeds = embedding_manager(input_ids, inputs_embeds)
-
 
                 position_embeddings = self.position_embedding(position_ids)
                 embeddings = inputs_embeds + position_embeddings
@@ -241,7 +236,6 @@ class FrozenCLIPEmbedder(AbstractEncoder):
             output_attentions = None,
             output_hidden_states = None,
             return_dict = None,
-            embedding_manager = None,
         ):
             output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
             output_hidden_states = (
@@ -255,7 +249,7 @@ class FrozenCLIPEmbedder(AbstractEncoder):
             input_shape = input_ids.size()
             input_ids = input_ids.view(-1, input_shape[-1])
 
-            hidden_states = self.embeddings(input_ids=input_ids, position_ids=position_ids, embedding_manager=embedding_manager)
+            hidden_states = self.embeddings(input_ids=input_ids, position_ids=position_ids)
 
             bsz, seq_len = input_shape
             # CLIP's text model uses causal mask, prepare it here.
@@ -292,7 +286,6 @@ class FrozenCLIPEmbedder(AbstractEncoder):
             output_attentions = None,
             output_hidden_states = None,
             return_dict = None,
-            embedding_manager = None,
         ):
             return self.text_model(
                 input_ids=input_ids,
@@ -300,8 +293,7 @@ class FrozenCLIPEmbedder(AbstractEncoder):
                 position_ids=position_ids,
                 output_attentions=output_attentions,
                 output_hidden_states=output_hidden_states,
-                return_dict=return_dict,
-                embedding_manager = embedding_manager
+                return_dict=return_dict
             )
 
         self.transformer.forward = transformer_forward.__get__(self.transformer)
