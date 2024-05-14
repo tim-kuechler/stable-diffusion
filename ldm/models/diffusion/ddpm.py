@@ -8,6 +8,7 @@ https://github.com/CompVis/taming-transformers
 
 import torch
 import torch.nn as nn
+import os
 import numpy as np
 import pytorch_lightning as pl
 from torch.optim.lr_scheduler import LambdaLR
@@ -63,6 +64,9 @@ class DDPM(pl.LightningModule):
                  cosine_s=8e-3,
                  given_betas=None,
                  original_elbo_weight=0.,
+                 embedding_reg_weight=0.,
+                 unfreeze_model=False,
+                 model_lr=0.,
                  v_posterior=0.,  # weight for choosing posterior variance as sigma = (1-v) * beta_tilde + v * beta
                  l_simple_weight=1.,
                  conditioning_key=None,
@@ -97,6 +101,10 @@ class DDPM(pl.LightningModule):
         self.v_posterior = v_posterior
         self.original_elbo_weight = original_elbo_weight
         self.l_simple_weight = l_simple_weight
+        self.embedding_reg_weight = embedding_reg_weight
+
+        self.unfreeze_model = unfreeze_model
+        self.model_lr = model_lr
 
         if monitor is not None:
             self.monitor = monitor
@@ -426,6 +434,7 @@ class LatentDiffusion(DDPM):
     def __init__(self,
                  first_stage_config,
                  cond_stage_config,
+                 personalization_config,
                  num_timesteps_cond=None,
                  cond_stage_key="image",
                  cond_stage_trainable=False,
@@ -434,7 +443,11 @@ class LatentDiffusion(DDPM):
                  conditioning_key=None,
                  scale_factor=1.0,
                  scale_by_std=False,
+                 reg_weight = 1.0,
                  *args, **kwargs):
+        
+        self.reg_weight = reg_weight
+
         self.num_timesteps_cond = default(num_timesteps_cond, 1)
         self.scale_by_std = scale_by_std
         assert self.num_timesteps_cond <= kwargs['timesteps']
@@ -467,6 +480,21 @@ class LatentDiffusion(DDPM):
         if ckpt_path is not None:
             self.init_from_ckpt(ckpt_path, ignore_keys)
             self.restarted_from_ckpt = True
+
+
+        if not self.unfreeze_model:
+            self.cond_stage_model.eval()
+            self.cond_stage_model.train = disabled_train
+            for param in self.cond_stage_model.parameters():
+                param.requires_grad = False
+
+            self.model.eval()
+            self.model.train = disabled_train
+            for param in self.model.parameters():
+                param.requires_grad = False
+        
+        self.embedding_manager = None
+
 
     def make_cond_schedule(self, ):
         self.cond_ids = torch.full(size=(self.num_timesteps,), fill_value=self.num_timesteps - 1, dtype=torch.long)
@@ -551,7 +579,7 @@ class LatentDiffusion(DDPM):
     def get_learned_conditioning(self, c):
         if self.cond_stage_forward is None:
             if hasattr(self.cond_stage_model, 'encode') and callable(self.cond_stage_model.encode):
-                c = self.cond_stage_model.encode(c)
+                c = self.cond_stage_model.encode(c, embedding_manager=self.embedding_manager)
                 if isinstance(c, DiagonalGaussianDistribution):
                     c = c.mode()
             else:
@@ -865,6 +893,27 @@ class LatentDiffusion(DDPM):
     def shared_step(self, batch, **kwargs):
         x, c = self.get_input(batch, self.first_stage_key)
         loss = self(x, c)
+        return loss
+    
+    def training_step(self, batch, batch_idx):
+        train_batch = batch[0]
+        reg_batch = batch[1]
+        
+        loss_train, loss_dict = self.shared_step(train_batch)
+        loss_reg, _ = self.shared_step(reg_batch)
+        
+        loss = loss_train + self.reg_weight * loss_reg
+
+        self.log_dict(loss_dict, prog_bar=True,
+                      logger=True, on_step=True, on_epoch=True)
+
+        self.log("global_step", self.global_step,
+                 prog_bar=True, logger=True, on_step=True, on_epoch=False)
+
+        if self.use_scheduler:
+            lr = self.optimizers().param_groups[0]['lr']
+            self.log('lr_abs', lr, prog_bar=True, logger=True, on_step=True, on_epoch=False)
+
         return loss
 
     def forward(self, x, c, *args, **kwargs):
@@ -1249,12 +1298,13 @@ class LatentDiffusion(DDPM):
 
     @torch.no_grad()
     def log_images(self, batch, N=8, n_row=4, sample=True, ddim_steps=200, ddim_eta=1., return_keys=None,
-                   quantize_denoised=True, inpaint=True, plot_denoise_rows=False, plot_progressive_rows=True,
-                   plot_diffusion_rows=True, **kwargs):
+                   quantize_denoised=True, inpaint=False, plot_denoise_rows=False, plot_progressive_rows=False,
+                   plot_diffusion_rows=False, **kwargs):
 
         use_ddim = ddim_steps is not None
 
         log = dict()
+        batch = batch[0]
         z, c, x, xrec, xc = self.get_input(batch, self.first_stage_key,
                                            return_first_stage_outputs=True,
                                            force_c_encode=True,
@@ -1308,6 +1358,16 @@ class LatentDiffusion(DDPM):
             if plot_denoise_rows:
                 denoise_grid = self._get_denoise_row_from_list(z_denoise_row)
                 log["denoise_row"] = denoise_grid
+            
+            uc = self.get_learned_conditioning(len(c) * [""])
+            sample_scaled, _ = self.sample_log(cond=c, 
+                                               batch_size=N, 
+                                               ddim=use_ddim, 
+                                               ddim_steps=ddim_steps,
+                                               eta=ddim_eta,                                                 
+                                               unconditional_guidance_scale=5.0,
+                                               unconditional_conditioning=uc)
+            log["samples_scaled"] = self.decode_first_stage(sample_scaled)
 
             if quantize_denoised and not isinstance(self.first_stage_model, AutoencoderKL) and not isinstance(
                     self.first_stage_model, IdentityFirstStage):
@@ -1360,27 +1420,61 @@ class LatentDiffusion(DDPM):
 
     def configure_optimizers(self):
         lr = self.learning_rate
-        params = list(self.model.parameters())
-        if self.cond_stage_trainable:
-            print(f"{self.__class__.__name__}: Also optimizing conditioner params!")
-            params = params + list(self.cond_stage_model.parameters())
-        if self.learn_logvar:
-            print('Diffusion model optimizing logvar')
-            params.append(self.logvar)
-        opt = torch.optim.AdamW(params, lr=lr)
-        if self.use_scheduler:
-            assert 'target' in self.scheduler_config
-            scheduler = instantiate_from_config(self.scheduler_config)
 
-            print("Setting up LambdaLR scheduler...")
-            scheduler = [
-                {
-                    'scheduler': LambdaLR(opt, lr_lambda=scheduler.schedule),
-                    'interval': 'step',
-                    'frequency': 1
-                }]
-            return [opt], scheduler
+        if self.embedding_manager is not None: # If using textual inversion
+            embedding_params = list(self.embedding_manager.embedding_parameters())
+
+            if self.unfreeze_model: # Are we allowing the base model to train? If so, set two different parameter groups.
+                model_params = list(self.cond_stage_model.parameters()) + list(self.model.parameters())
+                opt = torch.optim.AdamW([{"params": embedding_params, "lr": lr}, {"params": model_params}], lr=self.model_lr)
+            else: # Otherwise, train only embedding
+                opt = torch.optim.AdamW(embedding_params, lr=lr)
+        else:
+            params = list(self.model.parameters())
+            if self.cond_stage_trainable:
+                print(f"{self.__class__.__name__}: Also optimizing conditioner params!")
+                params = params + list(self.cond_stage_model.parameters())
+            if self.learn_logvar:
+                print('Diffusion model optimizing logvar')
+                params.append(self.logvar)
+
+            opt = torch.optim.AdamW(params, lr=lr)
+
         return opt
+
+    def configure_opt_embedding(self):
+
+        self.cond_stage_model.eval()
+        self.cond_stage_model.train = disabled_train
+        for param in self.cond_stage_model.parameters():
+            param.requires_grad = False
+
+        self.model.eval()
+        self.model.train = disabled_train
+        for param in self.model.parameters():
+            param.requires_grad = False
+
+        for param in self.embedding_manager.embedding_parameters():
+            param.requires_grad = True
+
+        lr = self.learning_rate
+        params = list(self.embedding_manager.embedding_parameters())
+        return torch.optim.AdamW(params, lr=lr)
+
+    def configure_opt_model(self):
+
+        for param in self.cond_stage_model.parameters():
+            param.requires_grad = True
+
+        for param in self.model.parameters():
+            param.requires_grad = True
+
+        for param in self.embedding_manager.embedding_parameters():
+            param.requires_grad = True
+
+        model_params = list(self.cond_stage_model.parameters()) + list(self.model.parameters())
+        embedding_params = list(self.embedding_manager.embedding_parameters())
+        return torch.optim.AdamW([{"params": embedding_params, "lr": self.learning_rate}, {"params": model_params}], lr=self.model_lr)
 
     @torch.no_grad()
     def to_rgb(self, x):
