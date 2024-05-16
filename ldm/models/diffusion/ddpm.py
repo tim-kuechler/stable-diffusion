@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from functools import partial
 from tqdm import tqdm
 from torchvision.utils import make_grid
-from pytorch_lightning.utilities.distributed import rank_zero_only
+from pytorch_lightning.utilities.rank_zero import rank_zero_only
 
 from ldm.util import log_txt_as_img, exists, default, ismap, isimage, mean_flat, count_params, instantiate_from_config
 from ldm.modules.ema import LitEma
@@ -434,7 +434,10 @@ class LatentDiffusion(DDPM):
                  conditioning_key=None,
                  scale_factor=1.0,
                  scale_by_std=False,
+                 reg_weight=1.0,
                  *args, **kwargs):
+        self.reg_weight = reg_weight
+
         self.num_timesteps_cond = default(num_timesteps_cond, 1)
         self.scale_by_std = scale_by_std
         assert self.num_timesteps_cond <= kwargs['timesteps']
@@ -866,6 +869,27 @@ class LatentDiffusion(DDPM):
         x, c = self.get_input(batch, self.first_stage_key)
         loss = self(x, c)
         return loss
+    
+    def training_step(self, batch, batch_idx):
+        train_batch = batch[0]
+        reg_batch = batch[1]
+        
+        loss_train, loss_dict = self.shared_step(train_batch)
+        loss_reg, _ = self.shared_step(reg_batch)
+        
+        loss = loss_train + self.reg_weight * loss_reg
+
+        self.log_dict(loss_dict, prog_bar=True,
+                      logger=True, on_step=True, on_epoch=True)
+
+        self.log("global_step", self.global_step,
+                 prog_bar=True, logger=True, on_step=True, on_epoch=False)
+
+        if self.use_scheduler:
+            lr = self.optimizers().param_groups[0]['lr']
+            self.log('lr_abs', lr, prog_bar=True, logger=True, on_step=True, on_epoch=False)
+
+        return loss
 
     def forward(self, x, c, *args, **kwargs):
         t = torch.randint(0, self.num_timesteps, (x.shape[0],), device=self.device).long()
@@ -1255,6 +1279,7 @@ class LatentDiffusion(DDPM):
         use_ddim = ddim_steps is not None
 
         log = dict()
+        batch = batch[0]
         z, c, x, xrec, xc = self.get_input(batch, self.first_stage_key,
                                            return_first_stage_outputs=True,
                                            force_c_encode=True,
